@@ -1,5 +1,4 @@
 #include <alloca.h>
-#include <execution>
 #include <iostream>
 #include <numeric>
 #include <vector>
@@ -198,6 +197,7 @@ void run(std::vector<Node>& dag) {
     }
 }
 
+// this is ridiculous. Should be refactored to an arena
 void* allocate(TypeId t) {
     switch (t) {
         case TypeId::VectorF64:
