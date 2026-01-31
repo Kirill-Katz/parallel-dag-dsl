@@ -1,10 +1,13 @@
 #include <alloca.h>
+#include <execution>
 #include <iostream>
 #include <numeric>
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
 #include <queue>
+#include <future>
+#include <x86intrin.h>
 
 enum class TypeId {
     VectorF64,
@@ -121,6 +124,67 @@ void topological_run(std::vector<Node>& dag) {
     }
 }
 
+void topological_run_parallel(std::vector<Node>& dag) {
+    const size_t n = dag.size();
+
+    std::vector<size_t> indeg(n, 0);
+    std::vector<std::vector<size_t>> adj(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t dep : dag[i].inputs) {
+            adj[dep].push_back(i);
+            ++indeg[i];
+        }
+    }
+
+    std::vector<size_t> frontier;
+    for (size_t i = 0; i < n; ++i) {
+        if (indeg[i] == 0) {
+            frontier.push_back(i);
+        }
+    }
+
+    size_t executed = 0;
+
+    while (!frontier.empty()) {
+        std::vector<std::future<void>> tasks;
+        tasks.reserve(frontier.size());
+
+        for (size_t idx : frontier) {
+            tasks.emplace_back(std::async(std::launch::async, [&, idx] {
+                Node& node = dag[idx];
+                if (node.op) {
+                    void* args[8];
+                    for (size_t i = 0; i < node.inputs.size(); ++i) {
+                        args[i] = dag[node.inputs[i]].storage;
+                    }
+                    node.op->fn(args, node.storage);
+                }
+            }));
+        }
+
+        for (auto& f : tasks) {
+            f.get();
+        }
+
+        std::vector<size_t> next;
+        for (size_t idx : frontier) {
+            ++executed;
+            for (auto& child : adj[idx]) {
+                if(--indeg[child] == 0) {
+                    next.push_back(child);
+                }
+            }
+        }
+
+        frontier = std::move(next);
+    }
+
+    if (executed != n) {
+        throw std::runtime_error("Failed to execute all the nodes!");
+    }
+}
+
 void run(std::vector<Node>& dag) {
     for (Node& n : dag) {
         if (!n.op) continue;
@@ -147,41 +211,70 @@ void* allocate(TypeId t) {
 int main() {
     register_ops();
 
-    std::vector<double> input_vec(10, 3.3);
+    std::vector<double> input_vec1(10'000'000, 3.3);
+    std::vector<double> input_vec2(10'000'000, 5.66);
 
     std::vector<Node> dag;
 
-    auto input_node = Node {
-        nullptr,
-        {},
-        TypeId::VectorF64,
-        &input_vec
-    };
-    dag.push_back(input_node);
+    dag.push_back({
+        .op = nullptr,
+        .inputs = {},
+        .type = TypeId::VectorF64,
+        .storage = &input_vec1
+    });
 
-    Node sum_node {
+    dag.push_back({
+        .op = nullptr,
+        .inputs = {},
+        .type = TypeId::VectorF64,
+        .storage = &input_vec2
+    });
+
+    dag.push_back({
         .op = &registry["SumVec"],
         .inputs = {0},
         .type = TypeId::F64,
         .storage = allocate(TypeId::F64)
-    };
-    dag.push_back(sum_node);
+    });
 
-    Node summation_node {
-        .op = &registry["SumVals"],
-        .inputs = {1, 1},
+    dag.push_back({
+        .op = &registry["SumVec"],
+        .inputs = {1},
         .type = TypeId::F64,
         .storage = allocate(TypeId::F64)
-    };
-    dag.push_back(summation_node);
+    });
 
+    dag.push_back({
+        .op = &registry["SumVals"],
+        .inputs = {2, 3},
+        .type = TypeId::F64,
+        .storage = allocate(TypeId::F64)
+    });
+
+    unsigned aux;
+
+    uint64_t t0_par = __rdtscp(&aux);
+    topological_run_parallel(dag);
+    uint64_t t1_par = __rdtscp(&aux);
+    uint64_t par_cycles = t1_par - t0_par;
+
+    std::cout << "Parallel version: " << par_cycles << '\n';
+
+    uint64_t t0_non_par = __rdtscp(&aux);
     topological_run(dag);
+    uint64_t t1_non_par = __rdtscp(&aux);
+    uint64_t non_par_cycles = t1_non_par - t0_non_par;
 
-    auto* result = static_cast<double*>(dag[2].storage);
+    std::cout << "Sequential version: " << non_par_cycles << '\n';
+
+    auto* result = static_cast<double*>(dag[4].storage);
     std::cout << "Result: " << *result << "\n";
 
-    delete static_cast<double*>(dag[1].storage);
+    std::cout << "Speed up: " << double(non_par_cycles) / double(par_cycles) << '\n';
+
     delete static_cast<double*>(dag[2].storage);
+    delete static_cast<double*>(dag[3].storage);
+    delete static_cast<double*>(dag[4].storage);
 
     return 0;
 }
