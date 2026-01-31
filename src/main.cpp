@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <queue>
 
 enum class TypeId {
     VectorF64,
@@ -33,7 +34,7 @@ void SumVec(void** inputs, void* output) {
 
 void SumVals(void** inputs, void* output) {
     auto* val1 = static_cast<const double*>(inputs[0]);
-    auto* val2 = static_cast<const double*>(inputs[0]);
+    auto* val2 = static_cast<const double*>(inputs[1]);
 
     auto* out = static_cast<double*>(output);
     *out = *val1 + *val2;
@@ -70,9 +71,54 @@ void register_ops() {
     registry["SumVals"] = sum_vals;
 }
 
-void topological_sort(std::vector<Node>& dag) {
+void topological_run(std::vector<Node>& dag) {
+    const size_t n = dag.size();
 
+    std::vector<size_t> indeg(n, 0);
+    std::vector<std::vector<size_t>> adj(n);
 
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t dep : dag[i].inputs) {
+            adj[dep].push_back(i);
+            ++indeg[i];
+        }
+    }
+
+    std::queue<size_t> bfs;
+    for (size_t i = 0; i < n; ++i) {
+        if (indeg[i] == 0) {
+            bfs.push(i);
+        }
+    }
+
+    size_t executed = 0;
+
+    while (!bfs.empty()) {
+        size_t idx = bfs.front();
+        bfs.pop();
+
+        Node& node = dag[idx];
+
+        if (node.op) {
+            void* args[8];
+            for (size_t i = 0; i < node.inputs.size(); ++i) {
+                args[i] = dag[node.inputs[i]].storage;
+            }
+            node.op->fn(args, node.storage);
+        }
+
+        ++executed;
+
+        for (auto& child : adj[idx]) {
+            if(--indeg[child] == 0) {
+                bfs.push(child);
+            }
+        }
+    }
+
+    if (executed != n) {
+        throw std::runtime_error("Failed to execute all the nodes!");
+    }
 }
 
 void run(std::vector<Node>& dag) {
@@ -123,18 +169,19 @@ int main() {
 
     Node summation_node {
         .op = &registry["SumVals"],
-        .inputs = {0, 1},
+        .inputs = {1, 1},
         .type = TypeId::F64,
         .storage = allocate(TypeId::F64)
     };
     dag.push_back(summation_node);
 
-    run(dag);
+    topological_run(dag);
 
-    auto* result = static_cast<double*>(dag[1].storage);
+    auto* result = static_cast<double*>(dag[2].storage);
     std::cout << "Result: " << *result << "\n";
 
     delete static_cast<double*>(dag[1].storage);
+    delete static_cast<double*>(dag[2].storage);
 
     return 0;
 }
