@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/alderson/Projects/Mine/parallel-dsl/build",
+  "command": "/usr/lib/ccache/c++  -I/home/alderson/Projects/Mine/parallel-dsl/include -std=c++20 -o CMakeFiles/dsl_poc_obj.dir/src/main.cpp.o -c /home/alderson/Projects/Mine/parallel-dsl/src/main.cpp",
+  "file": "/home/alderson/Projects/Mine/parallel-dsl/src/main.cpp",
+  "output": "CMakeFiles/dsl_poc_obj.dir/src/main.cpp.o"
+}
+]

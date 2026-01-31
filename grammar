@@ -1,0 +1,6 @@
+
+list := ident ("," ident)*
+assignments := ident "=" func "(" list ")"
+
+input := list
+output := list
