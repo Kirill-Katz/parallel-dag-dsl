@@ -2,30 +2,14 @@
 #include <iostream>
 #include <numeric>
 #include <vector>
-#include <unordered_map>
-#include <cstdint>
-#include <queue>
-#include <future>
 #include <x86intrin.h>
+#include <fstream>
+#include <sstream>
 
-enum class TypeId {
-    VectorF64,
-    F64
-};
-
-struct OpSignature {
-    std::vector<TypeId> input_types;
-    TypeId output_types;
-};
-
-using OpFn = void(*)(void** inputs, void* output);
-struct Operation {
-    std::string name;
-    OpSignature signature;
-    OpFn fn;
-};
-
-std::unordered_map<std::string, Operation> registry;
+#include "lexer.hpp"
+#include "parser.hpp"
+#include "operation_registry.hpp"
+#include "computation_dag.hpp"
 
 void SumVec(void** inputs, void* output) {
     auto* in = static_cast<const std::vector<double>*>(inputs[0]);
@@ -42,239 +26,76 @@ void SumVals(void** inputs, void* output) {
     *out = *val1 + *val2;
 }
 
-using NodeId = uint32_t;
-struct Node {
-    const Operation* op;
-    std::vector<NodeId> inputs;
-    TypeId type;
-    void* storage;
-};
+std::string read_file(const std::string& path) {
+    std::ifstream in(path, std::ios::in | std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("failed to open file");
+    }
 
-void register_ops() {
-    auto vec_sum = Operation {
-        "SumVec",
-        OpSignature {
-            {TypeId::VectorF64},
-            TypeId::F64
-        },
-        SumVec
-    };
-
-    auto sum_vals = Operation {
-        "SumVals",
-        OpSignature {
-            {TypeId::F64, TypeId::F64},
-            TypeId::F64
-        },
-        SumVals
-    };
-
-    registry["SumVec"] = vec_sum;
-    registry["SumVals"] = sum_vals;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
 }
 
-void topological_run(std::vector<Node>& dag) {
-    const size_t n = dag.size();
-
-    std::vector<size_t> indeg(n, 0);
-    std::vector<std::vector<size_t>> adj(n);
-
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t dep : dag[i].inputs) {
-            adj[dep].push_back(i);
-            ++indeg[i];
-        }
-    }
-
-    std::queue<size_t> bfs;
-    for (size_t i = 0; i < n; ++i) {
-        if (indeg[i] == 0) {
-            bfs.push(i);
-        }
-    }
-
-    size_t executed = 0;
-
-    while (!bfs.empty()) {
-        size_t idx = bfs.front();
-        bfs.pop();
-
-        Node& node = dag[idx];
-
-        if (node.op) {
-            void* args[8];
-            for (size_t i = 0; i < node.inputs.size(); ++i) {
-                args[i] = dag[node.inputs[i]].storage;
-            }
-            node.op->fn(args, node.storage);
-        }
-
-        ++executed;
-
-        for (auto& child : adj[idx]) {
-            if(--indeg[child] == 0) {
-                bfs.push(child);
-            }
-        }
-    }
-
-    if (executed != n) {
-        throw std::runtime_error("Failed to execute all the nodes!");
-    }
-}
-
-void topological_run_parallel(std::vector<Node>& dag) {
-    const size_t n = dag.size();
-
-    std::vector<size_t> indeg(n, 0);
-    std::vector<std::vector<size_t>> adj(n);
-
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t dep : dag[i].inputs) {
-            adj[dep].push_back(i);
-            ++indeg[i];
-        }
-    }
-
-    std::vector<size_t> frontier;
-    for (size_t i = 0; i < n; ++i) {
-        if (indeg[i] == 0) {
-            frontier.push_back(i);
-        }
-    }
-
-    size_t executed = 0;
-
-    while (!frontier.empty()) {
-        std::vector<std::future<void>> tasks;
-        tasks.reserve(frontier.size());
-
-        for (size_t idx : frontier) {
-            tasks.emplace_back(std::async(std::launch::async, [&, idx] {
-                Node& node = dag[idx];
-                if (node.op) {
-                    void* args[8];
-                    for (size_t i = 0; i < node.inputs.size(); ++i) {
-                        args[i] = dag[node.inputs[i]].storage;
-                    }
-                    node.op->fn(args, node.storage);
-                }
-            }));
-        }
-
-        for (auto& f : tasks) {
-            f.get();
-        }
-
-        std::vector<size_t> next;
-        for (size_t idx : frontier) {
-            ++executed;
-            for (auto& child : adj[idx]) {
-                if(--indeg[child] == 0) {
-                    next.push_back(child);
-                }
-            }
-        }
-
-        frontier = std::move(next);
-    }
-
-    if (executed != n) {
-        throw std::runtime_error("Failed to execute all the nodes!");
-    }
-}
-
-void run(std::vector<Node>& dag) {
-    for (Node& n : dag) {
-        if (!n.op) continue;
-
-        void* args[8];
-        for (size_t i = 0; i < n.inputs.size(); ++i) {
-            args[i] = dag[n.inputs[i]].storage;
-        }
-
-        n.op->fn(args, n.storage);
-    }
-}
-
-// this is ridiculous. Should be refactored to an arena
-void* allocate(TypeId t) {
-    switch (t) {
-        case TypeId::VectorF64:
-            return new std::vector<double>();
-        case TypeId::F64:
-            return new double();
-    }
-    std::abort();
+static inline uint64_t rdtscp_serialized() {
+    unsigned aux;
+    uint64_t t = __rdtscp(&aux);
+    return t;
 }
 
 int main() {
-    register_ops();
+    OperationRegistry registry;
+    registry.register_op("SumVec", Operation {
+        "SumVec",
+        OpSignature {
+            {TypeId::VecF64},
+            TypeId::f64
+        },
+        SumVec
+    });
+
+    registry.register_op("SumVals", Operation {
+        "SumVals",
+        OpSignature {
+            {TypeId::f64, TypeId::f64},
+            TypeId::f64
+        },
+        SumVals
+    });
 
     std::vector<double> input_vec1(10'000'000, 3.3);
     std::vector<double> input_vec2(10'000'000, 5.66);
 
-    std::vector<Node> dag;
+    Lexer lexer;
 
-    dag.push_back({
-        .op = nullptr,
-        .inputs = {},
-        .type = TypeId::VectorF64,
-        .storage = &input_vec1
-    });
+    const std::string& source = read_file("../test.dsl");
+    auto tokens = lexer.lex(source);
+    Parser parser(tokens, registry);
 
-    dag.push_back({
-        .op = nullptr,
-        .inputs = {},
-        .type = TypeId::VectorF64,
-        .storage = &input_vec2
-    });
+    auto& dag = parser.parse();
+    dag.bind_inputs({&input_vec1, &input_vec2});
 
-    dag.push_back({
-        .op = &registry["SumVec"],
-        .inputs = {0},
-        .type = TypeId::F64,
-        .storage = allocate(TypeId::F64)
-    });
-
-    dag.push_back({
-        .op = &registry["SumVec"],
-        .inputs = {1},
-        .type = TypeId::F64,
-        .storage = allocate(TypeId::F64)
-    });
-
-    dag.push_back({
-        .op = &registry["SumVals"],
-        .inputs = {2, 3},
-        .type = TypeId::F64,
-        .storage = allocate(TypeId::F64)
-    });
-
-    unsigned aux;
-
-    uint64_t t0_par = __rdtscp(&aux);
-    topological_run_parallel(dag);
-    uint64_t t1_par = __rdtscp(&aux);
+    uint64_t t0_par = rdtscp_serialized();
+    dag.topological_run_parallel();
+    uint64_t t1_par = rdtscp_serialized();
     uint64_t par_cycles = t1_par - t0_par;
 
-    std::cout << "Parallel version: " << par_cycles << '\n';
+    uint64_t t0_seq = rdtscp_serialized();
+    dag.topological_run();
+    uint64_t t1_seq = rdtscp_serialized();
+    uint64_t seq_cycles = t1_seq - t0_seq;
 
-    uint64_t t0_non_par = __rdtscp(&aux);
-    topological_run(dag);
-    uint64_t t1_non_par = __rdtscp(&aux);
-    uint64_t non_par_cycles = t1_non_par - t0_non_par;
+    double speedup = double(seq_cycles) / double(par_cycles);
 
-    std::cout << "Sequential version: " << non_par_cycles << '\n';
+    std::cout << "Sequential cycles: " << seq_cycles << '\n';
+    std::cout << "Parallel cycles:   " << par_cycles << '\n';
+    std::cout << "Speedup:           " << speedup << "x\n";
 
-    auto* result = static_cast<double*>(dag[4].storage);
-    std::cout << "Result: " << *result << "\n";
-
-    std::cout << "Speed up: " << double(non_par_cycles) / double(par_cycles) << '\n';
-
-    delete static_cast<double*>(dag[2].storage);
-    delete static_cast<double*>(dag[3].storage);
-    delete static_cast<double*>(dag[4].storage);
+    const auto& output_nodes = dag.get_output_nodes();
+    for (NodeId id : output_nodes) {
+        std::cout << "Output Node: " << id
+                  << " -> " << dag.get_output<double>(id) << '\n';
+    }
 
     return 0;
 }

@@ -1,6 +1,9 @@
-A, B
+A: VecF64
+B: VecF64
 
-x = VecSum(A)
-y = VecSum(B)
+x = SumVec(A)
+y = SumVec(B)
 
-x, y
+z = SumVals(x, y)
+
+return z

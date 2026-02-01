@@ -1,6 +1,5 @@
 
-list := ident ("," ident)*
-assignments := ident "=" func "(" list ")"
-
-input := list
-output := list
+List := Identifier ("," Identifier)*
+Assignment := Identifier "=" Identifier "(" List? ")" NewLine
+Input := Identifier ":" Identifier NewLine
+Output := "return" List NewLine
