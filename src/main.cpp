@@ -65,6 +65,7 @@ int main() {
 
     std::vector<double> input_vec1(10'000'000, 3.3);
     std::vector<double> input_vec2(10'000'000, 5.66);
+    std::vector<double> input_vec3(10'000'000, 0.66);
 
     Lexer lexer;
 
@@ -73,7 +74,7 @@ int main() {
     Parser parser(tokens, registry);
 
     auto& dag = parser.parse();
-    dag.bind_inputs({&input_vec1, &input_vec2});
+    dag.bind_inputs({&input_vec1, &input_vec2, &input_vec3});
 
     uint64_t t0_par = rdtscp_serialized();
     dag.topological_run_parallel();
